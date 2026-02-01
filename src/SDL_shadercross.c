@@ -419,6 +419,9 @@ static void *SDL_ShaderCross_INTERNAL_CompileUsingDXC(
             dxcInstance->lpVtbl->Release(dxcInstance);
             utils->lpVtbl->Release(utils);
             SDL_free(entryPointUtf16);
+            for (Uint32 i = 0; i < numDefineStrings; i += 1) {
+                SDL_free(defineStringsUtf16[i]);
+            }
             return NULL;
         }
         args[argCount++] = (LPCWSTR)L"-I";
@@ -443,12 +446,17 @@ static void *SDL_ShaderCross_INTERNAL_CompileUsingDXC(
     if (spirv) {
         args[argCount++] = (LPCWSTR)L"-spirv";
         args[argCount++] = (LPCWSTR)L"-fspv-flatten-resource-arrays";
-        args[argCount++] = (LPCWSTR)L"-fspv-preserve-bindings";
+
+        if (!SDL_GetBooleanProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_CULL_UNUSED_BINDINGS_BOOLEAN, false))
+        {
+            args[argCount++] = (LPCWSTR)L"-fspv-preserve-bindings";
+        }
+
         args[argCount++] = (LPCWSTR)L"-fspv-preserve-interface";
         args[argCount++] = (LPCWSTR)L"-fspv-target-env=vulkan1.1";
     }
 
-    if (info->enable_debug) {
+    if (SDL_GetBooleanProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_ENABLE_BOOLEAN, false)) {
         if (spirv) {
             // https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#debugging
             args[argCount++] = (LPCWSTR)L"-fspv-debug=vulkan-with-source";
@@ -458,8 +466,9 @@ static void *SDL_ShaderCross_INTERNAL_CompileUsingDXC(
         }
     }
 
-    if (info->name) {
-        nameUtf16 = (wchar_t *)SDL_iconv_string("WCHAR_T", "UTF-8", info->name, SDL_utf8strlen(info->name) + 1);
+    if (SDL_HasProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING)) {
+        const char *debugName = SDL_GetStringProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING, NULL);
+        nameUtf16 = (wchar_t *)SDL_iconv_string("WCHAR_T", "UTF-8", debugName, SDL_utf8strlen(debugName) + 1);
         if (nameUtf16 != NULL) {
             args[argCount++] = nameUtf16; // a bare string inserted into the arguments is treated as the source file name
         }
@@ -478,7 +487,12 @@ static void *SDL_ShaderCross_INTERNAL_CompileUsingDXC(
         IID_IDxcResult,
         (void **)&dxcResult);
 
+    SDL_free(args);
     SDL_free(entryPointUtf16);
+    for (Uint32 i = 0; i < numDefineStrings; i += 1) {
+        SDL_free(defineStringsUtf16[i]);
+    }
+    SDL_free(defineStringsUtf16);
     if (includeDirUtf16 != NULL) {
         SDL_free(includeDirUtf16);
     }
@@ -551,12 +565,6 @@ static void *SDL_ShaderCross_INTERNAL_CompileUsingDXC(
     dxcInstance->lpVtbl->Release(dxcInstance);
     utils->lpVtbl->Release(utils);
 
-    for (Uint32 i = 0; i < numDefineStrings; i += 1) {
-        SDL_free(defineStringsUtf16[i]);
-    }
-    SDL_free(defineStringsUtf16);
-    SDL_free(args);
-
     return buffer;
 #else
     SDL_SetError("%s", "Shadercross was not built with DXC support, cannot compile using DXC!");
@@ -591,9 +599,7 @@ void *SDL_ShaderCross_CompileDXILFromHLSL(
     spirvInfo.bytecode_size = spirvSize;
     spirvInfo.entrypoint = info->entrypoint;
     spirvInfo.shader_stage = info->shader_stage;
-    spirvInfo.enable_debug = info->enable_debug;
-    spirvInfo.name = info->name;
-    spirvInfo.props = 0;
+    spirvInfo.props = info->props;
 
     void *translatedSource = SDL_ShaderCross_TranspileHLSLFromSPIRV(
         &spirvInfo);
@@ -647,6 +653,15 @@ typedef void ID3DInclude;      /* hack, unused */
 #define D3DCOMPILER_DLL "libvkd3d-utils.1.dylib"
 #else
 #define D3DCOMPILER_DLL "libvkd3d-utils.so.1"
+#endif
+
+#ifdef SDL_ELF_NOTE_DLOPEN
+SDL_ELF_NOTE_DLOPEN(
+    "dxbc",
+    "Create DXBC shaders from HLSL",
+    SDL_ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+    D3DCOMPILER_DLL
+)
 #endif
 
 /* __stdcall declaration, largely taken from vkd3d_windows.h */
@@ -770,9 +785,7 @@ void *SDL_ShaderCross_INTERNAL_CompileDXBCFromHLSL(
         spirvInfo.bytecode_size = spirv_size;
         spirvInfo.entrypoint = info->entrypoint;
         spirvInfo.shader_stage = info->shader_stage;
-        spirvInfo.enable_debug = info->enable_debug;
-        spirvInfo.name = info->name;
-        spirvInfo.props = 0;
+        spirvInfo.props = info->props;
 
         transpiledSource = SDL_ShaderCross_TranspileHLSLFromSPIRV(
             &spirvInfo);
@@ -796,7 +809,7 @@ void *SDL_ShaderCross_INTERNAL_CompileDXBCFromHLSL(
         transpiledSource != NULL ? transpiledSource : info->source,
         info->entrypoint,
         shaderProfile,
-        info->enable_debug);
+        SDL_GetBooleanProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_ENABLE_BOOLEAN, false));
 
     if (blob == NULL) {
         SDL_free(transpiledSource);
@@ -912,7 +925,7 @@ static SPIRVTranspileContext *SDL_ShaderCross_INTERNAL_TranspileFromSPIRV(
         spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL, shadermodel);
         spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_HLSL_NONWRITABLE_UAV_TEXTURE_AS_SRV, 1);
         spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_HLSL_FLATTEN_MATRIX_VERTEX_INPUT_SEMANTICS, 1);
-        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_HLSL_USE_ENTRY_POINT_NAME, !SDL_GetBooleanProperty(props, SDL_SHADERCROSS_PROP_SPIRV_PSSL_COMPATIBILITY, false));
+        spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_HLSL_USE_ENTRY_POINT_NAME, !SDL_GetBooleanProperty(props, SDL_SHADERCROSS_PROP_SPIRV_PSSL_COMPATIBILITY_BOOLEAN, false));
         spvc_compiler_options_set_bool(options, SPVC_COMPILER_OPTION_HLSL_POINT_SIZE_COMPAT, true);
     }
 
@@ -930,7 +943,7 @@ static SPIRVTranspileContext *SDL_ShaderCross_INTERNAL_TranspileFromSPIRV(
     }
 
     if (backend == SPVC_BACKEND_MSL) {
-        const char *_mslVersion = SDL_GetStringProperty(props, SDL_SHADERCROSS_PROP_SPIRV_MSL_VERSION, "1.2.0");
+        const char *_mslVersion = SDL_GetStringProperty(props, SDL_SHADERCROSS_PROP_SPIRV_MSL_VERSION_STRING, "1.2.0");
         int mslVersion = parse_version_number(_mslVersion);
         if (mslVersion == - 1) {
             SDL_SetError("failed to parse MSL version string \"%s\"", _mslVersion);
@@ -1902,10 +1915,10 @@ SDL_ShaderCross_GraphicsShaderMetadata * SDL_ShaderCross_ReflectGraphicsSPIRV(
     SDL_ShaderCross_INTERNAL_GetIOVars(compiler, reflected_resources, num_outputs, allocMetadata->outputs, allocMemory + offset_outputnames);
     spvc_context_destroy(context);
 
-    allocMetadata->num_samplers = num_texture_samplers;
-    allocMetadata->num_storage_textures = num_storage_textures;
-    allocMetadata->num_storage_buffers = num_storage_buffers;
-    allocMetadata->num_uniform_buffers = num_uniform_buffers;
+    allocMetadata->resource_info.num_samplers = num_texture_samplers;
+    allocMetadata->resource_info.num_storage_textures = num_storage_textures;
+    allocMetadata->resource_info.num_storage_buffers = num_storage_buffers;
+    allocMetadata->resource_info.num_uniform_buffers = num_uniform_buffers;
     allocMetadata->num_inputs = num_inputs;
     allocMetadata->num_outputs = num_outputs;
 
@@ -2194,9 +2207,11 @@ static void *SDL_ShaderCross_INTERNAL_CompileFromSPIRV(
         createInfo.threadcount_z = pipelineInfo->threadcount_z;
 
         createInfo.props = 0;
-        if (info->name != NULL) {
+
+        const char *debugName = SDL_GetStringProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING, NULL);
+        if (debugName) {
             createInfo.props = SDL_CreateProperties();
-            SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, info->name);
+            SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, debugName);
         }
 
         SDL_ShaderCross_HLSL_Info hlslInfo;
@@ -2204,10 +2219,8 @@ static void *SDL_ShaderCross_INTERNAL_CompileFromSPIRV(
         hlslInfo.entrypoint = transpileContext->cleansed_entrypoint;
         hlslInfo.include_dir = NULL;
         hlslInfo.defines = NULL;
-        hlslInfo.enable_debug = info->enable_debug;
         hlslInfo.shader_stage = SDL_SHADERCROSS_SHADERSTAGE_COMPUTE;
-        hlslInfo.name = info->name;
-        hlslInfo.props = 0;
+        hlslInfo.props = info->props;
 
         if (targetFormat == SDL_GPU_SHADERFORMAT_DXBC) {
             createInfo.code = SDL_ShaderCross_INTERNAL_CompileDXBCFromHLSL(
@@ -2244,15 +2257,17 @@ static void *SDL_ShaderCross_INTERNAL_CompileFromSPIRV(
         createInfo.entrypoint = transpileContext->cleansed_entrypoint;
         createInfo.format = targetFormat;
         createInfo.stage = (SDL_GPUShaderStage)info->shader_stage;
-        createInfo.num_samplers = shaderInfo->num_samplers;
-        createInfo.num_storage_textures = shaderInfo->num_storage_textures;
-        createInfo.num_storage_buffers = shaderInfo->num_storage_buffers;
-        createInfo.num_uniform_buffers = shaderInfo->num_uniform_buffers;
+        createInfo.num_samplers = shaderInfo->resource_info.num_samplers;
+        createInfo.num_storage_textures = shaderInfo->resource_info.num_storage_textures;
+        createInfo.num_storage_buffers = shaderInfo->resource_info.num_storage_buffers;
+        createInfo.num_uniform_buffers = shaderInfo->resource_info.num_uniform_buffers;
 
         createInfo.props = 0;
-        if (info->name != NULL) {
+
+        const char *debugName = SDL_GetStringProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING, NULL);
+        if (debugName) {
             createInfo.props = SDL_CreateProperties();
-            SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, info->name);
+            SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, debugName);
         }
 
         SDL_ShaderCross_HLSL_Info hlslInfo;
@@ -2260,10 +2275,8 @@ static void *SDL_ShaderCross_INTERNAL_CompileFromSPIRV(
         hlslInfo.entrypoint = transpileContext->cleansed_entrypoint;
         hlslInfo.include_dir = NULL;
         hlslInfo.defines = NULL;
-        hlslInfo.enable_debug = info->enable_debug;
         hlslInfo.shader_stage = info->shader_stage;
-        hlslInfo.name = info->name;
-        hlslInfo.props = 0;
+        hlslInfo.props = info->props;
 
         if (targetFormat == SDL_GPU_SHADERFORMAT_DXBC) {
             createInfo.code = SDL_ShaderCross_INTERNAL_CompileDXBCFromHLSL(
@@ -2332,7 +2345,7 @@ void *SDL_ShaderCross_TranspileHLSLFromSPIRV(
 
     SPIRVTranspileContext *context = SDL_ShaderCross_INTERNAL_TranspileFromSPIRV(
         SPVC_BACKEND_HLSL,
-        SDL_GetBooleanProperty(info->props, SDL_SHADERCROSS_PROP_SPIRV_PSSL_COMPATIBILITY, false) ? 50 : 60,
+        SDL_GetBooleanProperty(info->props, SDL_SHADERCROSS_PROP_SPIRV_PSSL_COMPATIBILITY_BOOLEAN, false) ? 50 : 60,
         info->shader_stage,
         info->bytecode,
         info->bytecode_size,
@@ -2380,9 +2393,7 @@ void *SDL_ShaderCross_CompileDXBCFromSPIRV(
     hlslInfo.include_dir = NULL;
     hlslInfo.defines = NULL;
     hlslInfo.shader_stage = info->shader_stage;
-    hlslInfo.enable_debug = info->enable_debug;
-    hlslInfo.name = info->name;
-    hlslInfo.props = 0;
+    hlslInfo.props = info->props;
 
     void *result = SDL_ShaderCross_INTERNAL_CompileDXBCFromHLSL(
         &hlslInfo,
@@ -2426,13 +2437,12 @@ void *SDL_ShaderCross_CompileDXILFromSPIRV(
     hlslInfo.include_dir = NULL;
     hlslInfo.defines = NULL;
     hlslInfo.shader_stage = info->shader_stage;
-    hlslInfo.enable_debug = info->enable_debug;
-    hlslInfo.name = info->name;
-    hlslInfo.props = 0;
+    hlslInfo.props = info->props;
 
-    void *result = SDL_ShaderCross_CompileDXILFromHLSL(
-        &hlslInfo,
-        size);
+    void *result = SDL_ShaderCross_INTERNAL_CompileUsingDXC(
+      &hlslInfo,
+      false,
+      size);
 
     SDL_ShaderCross_INTERNAL_DestroyTranspileContext(context);
     return result;
@@ -2467,9 +2477,11 @@ static void *SDL_ShaderCross_INTERNAL_CreateShaderFromSPIRV(
             createInfo.threadcount_z = pipelineMetadata->threadcount_z;
 
             createInfo.props = 0;
-            if (info->name != NULL) {
+
+            const char *debugName = SDL_GetStringProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING, NULL);
+            if (debugName) {
                 createInfo.props = SDL_CreateProperties();
-                SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, info->name);
+                SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, debugName);
             }
 
             SDL_GPUComputePipeline *result = SDL_CreateGPUComputePipeline(device, &createInfo);
@@ -2481,22 +2493,24 @@ static void *SDL_ShaderCross_INTERNAL_CreateShaderFromSPIRV(
             return result;
         } else {
             SDL_GPUShaderCreateInfo createInfo;
-            SDL_ShaderCross_GraphicsShaderMetadata *shaderMetadata = (SDL_ShaderCross_GraphicsShaderMetadata *)metadata;
+            SDL_ShaderCross_GraphicsShaderResourceInfo *resourceInfo = (SDL_ShaderCross_GraphicsShaderResourceInfo *)metadata;
 
             createInfo.code = info->bytecode;
             createInfo.code_size = info->bytecode_size;
             createInfo.entrypoint = info->entrypoint;
             createInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
             createInfo.stage = (SDL_GPUShaderStage)info->shader_stage;
-            createInfo.num_samplers = shaderMetadata->num_samplers;
-            createInfo.num_storage_textures = shaderMetadata->num_storage_textures;
-            createInfo.num_storage_buffers = shaderMetadata->num_storage_buffers;
-            createInfo.num_uniform_buffers = shaderMetadata->num_uniform_buffers;
+            createInfo.num_samplers = resourceInfo->num_samplers;
+            createInfo.num_storage_textures = resourceInfo->num_storage_textures;
+            createInfo.num_storage_buffers = resourceInfo->num_storage_buffers;
+            createInfo.num_uniform_buffers = resourceInfo->num_uniform_buffers;
 
             createInfo.props = 0;
-            if (info->name != NULL) {
+
+            const char *debugName = SDL_GetStringProperty(info->props, SDL_SHADERCROSS_PROP_SHADER_DEBUG_NAME_STRING, NULL);
+            if (debugName) {
                 createInfo.props = SDL_CreateProperties();
-                SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, info->name);
+                SDL_SetStringProperty(createInfo.props, SDL_PROP_GPU_SHADER_CREATE_NAME_STRING, debugName);
             }
 
             SDL_GPUShader *result = SDL_CreateGPUShader(device, &createInfo);
@@ -2534,7 +2548,7 @@ static void *SDL_ShaderCross_INTERNAL_CreateShaderFromSPIRV(
 SDL_GPUShader *SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
     SDL_GPUDevice *device,
     const SDL_ShaderCross_SPIRV_Info *info,
-    const SDL_ShaderCross_GraphicsShaderMetadata *metadata,
+    const SDL_ShaderCross_GraphicsShaderResourceInfo *resourceInfo,
     SDL_PropertiesID props)
 {
     if (device == NULL) {
@@ -2547,7 +2561,7 @@ SDL_GPUShader *SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
         return NULL;
     }
 
-    if (metadata == NULL) {
+    if (resourceInfo == NULL) {
         SDL_InvalidParamError("metadata");
         return NULL;
     }
@@ -2555,7 +2569,7 @@ SDL_GPUShader *SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
     return (SDL_GPUShader *)SDL_ShaderCross_INTERNAL_CreateShaderFromSPIRV(
         device,
         info,
-        (void*) metadata,
+        (void*) resourceInfo,
         props);
 }
 
